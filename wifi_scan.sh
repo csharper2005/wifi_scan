@@ -53,13 +53,38 @@ printf "%-32s %-17s %-7s %-10s %-16s %-8s %s\n" \
         [ -d "/sys/class/ieee80211/$PHY" ] || continue
 
         SCAN_IF="scan_${PHY}"
+        CREATED_TMP=0
+        SCAN_CMD="scan"
 
-        # Create a temporary virtual station interface to scan without dropping active clients
-        iw phy "$PHY" interface add "$SCAN_IF" type station 2>/dev/null
-        ip link set "$SCAN_IF" up 2>/dev/null
+        # 1. Try creating a temporary virtual station interface
+        if iw phy "$PHY" interface add "$SCAN_IF" type station 2>/dev/null && \
+           ip link set "$SCAN_IF" up 2>/dev/null; then
+            CREATED_TMP=1
+        else
+            # Clean up partial interface if creation succeeded but 'up' failed
+            iw dev "$SCAN_IF" del 2>/dev/null
+
+            # 2. Fallback: find an existing UP interface belonging to this PHY
+            SCAN_IF=""
+            for net_if in /sys/class/ieee80211/"$PHY"/device/net/*; do
+                [ -e "$net_if" ] || continue
+                if_name=$(basename "$net_if")
+                # Check if interface is UP (flags bit 0x1)
+                flags=$(cat "$net_if/flags" 2>/dev/null)
+                if [ $((flags & 1)) -eq 1 ]; then
+                    SCAN_IF="$if_name"
+                    # 'ap-force' allows scanning on an active AP/STA interface
+                    SCAN_CMD="scan ap-force"
+                    break
+                fi
+            done
+        fi
+
+        # Skip PHY if no usable interface is available
+        [ -z "$SCAN_IF" ] && continue
 
         # Perform scan and parse raw output using awk
-        iw dev "$SCAN_IF" scan 2>/dev/null | awk \
+        iw dev "$SCAN_IF" $SCAN_CMD 2>/dev/null | awk \
             -v ex_ssids="$EXCLUDE_SSIDS" \
             -v ex_ssid_re="$EXCLUDE_SSID_PATTERNS" \
             -v ex_mac_re="$EXCLUDE_MAC_PATTERNS" '
@@ -167,7 +192,7 @@ printf "%-32s %-17s %-7s %-10s %-16s %-8s %s\n" \
             ssid = ""; chan = ""; bw = "20 MHz"; rssi = ""; freq = 0
             sec = ""; has_wpa = 0; has_rsn = 0; has_wps = 0
             wpa_auth = ""; wpa_cipher = ""; rsn_auth = ""; rsn_cipher = ""
-            is_ess = 0; is_ibss = 0; is_priv = 0; mfp = ""
+            is_ess = 0; is_ibss = 0; is_priv = 0; mfp = ""; ht_check = 0
         }
         /^[ \t]+freq:/ {
             freq = int($2)
@@ -191,9 +216,9 @@ printf "%-32s %-17s %-7s %-10s %-16s %-8s %s\n" \
             if (chan == "") chan = $4
         }
         /^[ \t]+\* channel width:/ {
-            if ($4 == "1") bw = "40 MHz"
-            else if ($4 == "2") bw = "80 MHz"
-            else if ($4 == "3") bw = "160 MHz"
+            if ($4 == "1") bw = "80 MHz"
+            else if ($4 == "2" || $4 == "3") bw = "160 MHz"
+            else if ($0 ~ /320 MHz/) bw = "320 MHz"
         }
         /^[ \t]+HT operation:/ {
             if (bw == "20 MHz") ht_check = 1
@@ -233,9 +258,11 @@ printf "%-32s %-17s %-7s %-10s %-16s %-8s %s\n" \
             print_bss()
         }'
 
-        # Tear down and remove temporary virtual interface
-        ip link set "$SCAN_IF" down 2>/dev/null
-        iw dev "$SCAN_IF" del 2>/dev/null
+        # Tear down and remove temporary virtual interface ONLY if we created it
+        if [ "$CREATED_TMP" -eq 1 ]; then
+            ip link set "$SCAN_IF" down 2>/dev/null
+            iw dev "$SCAN_IF" del 2>/dev/null
+        fi
     done
 } | sort -rn | cut -f2- >> "$LOG_BASE"
 
