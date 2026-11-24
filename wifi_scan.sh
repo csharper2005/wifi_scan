@@ -84,7 +84,19 @@ printf "%-32s %-17s %-7s %-10s %-16s %-8s %s\n" \
         [ -z "$SCAN_IF" ] && continue
 
         # Perform scan and parse raw output using awk
-        iw dev "$SCAN_IF" $SCAN_CMD 2>/dev/null | awk \
+        iw dev "$SCAN_IF" $SCAN_CMD 2>/dev/null | while IFS= read -r line; do
+        case "$line" in
+        *"SSID: "*)
+            prefix="${line%%SSID: *}SSID: "
+            raw_ssid="${line#*SSID: }"
+            safe_ssid=$(printf '%s' "$raw_ssid" | sed 's/%/%%/g')
+            printf "%s%b\n" "$prefix" "$safe_ssid"
+            ;;
+        *)
+            printf "%s\n" "$line"
+            ;;
+        esac
+        done | awk \
             -v ex_ssids="$EXCLUDE_SSIDS" \
             -v ex_ssid_re="$EXCLUDE_SSID_PATTERNS" \
             -v ex_mac_re="$EXCLUDE_MAC_PATTERNS" '
@@ -158,6 +170,25 @@ printf "%-32s %-17s %-7s %-10s %-16s %-8s %s\n" \
             return res
         }
 
+        function utf8_pad(str, width,    i, b, chars, bytes, pad) {
+            bytes = length(str)
+            chars = 0
+            for (i = 1; i <= bytes; i++) {
+                b = substr(str, i, 1)
+                if (b < "\200" || b >= "\300") {
+                    chars++
+                    if (chars > width) {
+                        str = substr(str, 1, i - 1)
+                        chars = width
+                        break
+                    }
+                }
+            }
+            pad = ""
+            for (i = chars; i < width; i++) pad = pad " "
+            return str pad
+        }
+
         function print_bss(    sort_key) {
             if (mac == "") return
             if (ssid == "") ssid = "<hidden>"
@@ -182,7 +213,7 @@ printf "%-32s %-17s %-7s %-10s %-16s %-8s %s\n" \
 
             # Prefix numeric RSSI + tab as sort key, stripped after sorting
             printf "%d\t%-32s %-17s %-7s %-10s %-16s %-8s %s\n", \
-                sort_key, substr(ssid, 1, 32), mac, chan, bw, dist, rssi_str, build_caps()
+                sort_key, utf8_pad(ssid, 32), mac, chan, bw, dist, rssi_str, build_caps()
         }
 
         /^BSS / {
